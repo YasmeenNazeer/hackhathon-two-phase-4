@@ -1,0 +1,36 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: elevate-app
+
+resources:
+- 01-namespace.yaml
+- 07-secrets.yaml
+- 08-configmap.yaml
+- 03-pvc.yaml
+- 02-postgres.yaml
+- 04-mcp-server.yaml
+- 05-backend.yaml
+- 06-frontend.yaml
+
+commonLabels:
+  app.kubernetes.io/version: "1.0.0"
+  app.kubernetes.io/part-of: "elevate-app"
+
+images:
+- name: postgres
+  newName: postgres
+  newTag: "13"
+
+configMapGenerator:
+- name: elevate-config
+  literals:
+  - LOG_LEVEL=info
+  - API_TIMEOUT=30
+
+secretGenerator:
+- name: elevate-secrets
+  literals:
+  - gemini-api-key=CHANGEME
+  - jwt-secret=CHANGEME
+  behavior: merge

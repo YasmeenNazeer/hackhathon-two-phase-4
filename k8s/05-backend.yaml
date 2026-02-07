@@ -1,0 +1,733 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend-deployment
+  namespace: elevate-app
+  labels:
+    app: backend
+    app.kubernetes.io/name: backend
+    app.kubernetes.io/part-of: elevate-app
+    app.kubernetes.io/version: "1.0.0"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: backend
+  template:
+    metadata:
+      labels:
+        app: backend
+        app.kubernetes.io/name: backend
+        app.kubernetes.io/part-of: elevate-app
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 2000
+      containers:
+      - name: backend
+        image: python:3.11-slim
+        imagePullPolicy: IfNotPresent
+        workingDir: /app
+        ports:
+        - containerPort: 8000
+          name: backend-api
+        env:
+        - name: DATABASE_URL
+          valueFrom:
+            configMapRef:
+              name: elevate-config
+              key: DATABASE_URL
+        envFrom:
+        - secretRef:
+            name: elevate-secrets
+        - configMapRef:
+            name: elevate-config
+        command:
+        - "python"
+        - "-c"
+        - |
+          import subprocess
+          import sys
+          import os
+
+          # Install dependencies
+          os.system("apt-get update && apt-get install -y gcc && pip install --no-cache-dir fastapi uvicorn httpx google-generativeai sqlmodel psycopg2-binary python-multipart pydantic-settings python-jose[cryptography] passlib[bcrypt]")
+
+          # Create app directory and copy code
+          os.makedirs('/app', exist_ok=True)
+          os.chdir('/app')
+
+          # Create the directory structure
+          os.makedirs('/app/backend/app', exist_ok=True)
+          os.makedirs('/app/backend/app/routes', exist_ok=True)
+          os.makedirs('/app/backend/app/models', exist_ok=True)
+
+          # Create main.py
+          main_content = '''
+          import uvicorn
+
+          if __name__ == "__main__":
+              uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=False)
+          '''
+          with open('/app/backend/main.py', 'w') as f:
+              f.write(main_content)
+
+          # Create app/main.py
+          app_main_content = '''
+          # backend/app/main.py
+
+          from fastapi import FastAPI
+          from fastapi.middleware.cors import CORSMiddleware
+          from app.routes import tasks, chat
+
+          app = FastAPI()
+
+          app.add_middleware(
+              CORSMiddleware,
+              allow_origins=["*"],  # In production, restrict this to specific domains
+              allow_credentials=True,
+              allow_methods=["*"],
+              allow_headers=["*"],
+          )
+
+          app.include_router(tasks.router, prefix="/api")
+          app.include_router(chat.router, prefix="/api")
+
+          @app.get("/")
+          def root():
+              return {"status": "Backend running"}
+
+          @app.get("/health")
+          def health_check():
+              return {"status": "healthy", "component": "backend"}
+          '''
+          with open('/app/backend/app/main.py', 'w') as f:
+              f.write(app_main_content)
+
+          # Create app/config.py
+          config_content = '''
+          import os
+          from pydantic_settings import BaseSettings
+
+          class Settings(BaseSettings):
+              DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite:///./test.db")
+              GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
+              JWT_SECRET: str = os.getenv("JWT_SECRET", "your-default-jwt-secret-change-this")
+
+          settings = Settings()
+          '''
+          with open('/app/backend/app/config.py', 'w') as f:
+              f.write(config_content)
+
+          # Create app/auth.py
+          auth_content = '''
+          import re
+          from fastapi import HTTPException, Header
+          from .config import settings
+
+          def validate_user_id(user_id: str) -> bool:
+              """Validate user ID format"""
+              if not user_id or not isinstance(user_id, str):
+                  return False
+              # Check that user ID is alphanumeric with hyphens/underscores, length 1-64
+              if not re.match(r'^[a-zA-Z0-9_-]{1,64}$', user_id):
+                  return False
+              return True
+
+          async def get_current_user_id(x_user_id: str = Header(None)):
+              user_id = x_user_id
+
+              if not user_id:
+                  raise HTTPException(status_code=401, detail="Missing X-User-ID header")
+
+              if not validate_user_id(user_id):
+                  raise HTTPException(status_code=401, detail="Invalid X-User-ID format")
+
+              return user_id
+          '''
+          with open('/app/backend/app/auth.py', 'w') as f:
+              f.write(auth_content)
+
+          # Create app/database.py
+          db_content = '''
+          from sqlmodel import create_engine, Session, SQLModel
+          from .config import settings
+
+          # Import all models to ensure they're registered with SQLModel before creating tables
+          from .models import Task
+          from .models.chat import Conversation, Message
+
+          engine = create_engine(settings.DATABASE_URL)
+
+          def init_db():
+              SQLModel.metadata.create_all(engine)
+
+          def get_session():
+              with Session(engine) as session:
+                  yield session
+          '''
+          with open('/app/backend/app/database.py', 'w') as f:
+              f.write(db_content)
+
+          # Create app/models/__init__.py
+          os.makedirs('/app/backend/app/models', exist_ok=True)
+          with open('/app/backend/app/models/__init__.py', 'w') as f:
+              f.write('')
+
+          # Create app/models/task.py
+          task_model_content = '''
+          from sqlmodel import SQLModel, Field
+          from uuid import UUID, uuid4
+          from datetime import datetime
+          from typing import Optional
+
+          class TaskBase(SQLModel):
+              title: str
+              description: Optional[str] = None
+              is_completed: bool = False
+              category: Optional[str] = Field(default="Personal")
+              due_date: Optional[datetime] = None
+
+          class Task(TaskBase, table=True):
+              id: UUID = Field(default_factory=uuid4, primary_key=True)
+              user_id: str = Field(index=True)
+              created_at: datetime = Field(default_factory=datetime.utcnow)
+              updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+          class TaskCreate(TaskBase):
+              pass
+
+          class TaskUpdate(SQLModel):
+              title: Optional[str] = None
+              description: Optional[str] = None
+              is_completed: Optional[bool] = None
+              category: Optional[str] = None
+              due_date: Optional[datetime] = None
+          '''
+          with open('/app/backend/app/models/task.py', 'w') as f:
+              f.write(task_model_content)
+
+          # Create app/models/chat.py
+          chat_model_content = '''
+          from typing import Optional, List
+          from sqlmodel import Field, Relationship, SQLModel
+          from datetime import datetime, timezone
+
+          class Conversation(SQLModel, table=True):
+              id: Optional[int] = Field(default=None, primary_key=True)
+              user_id: str = Field(index=True)
+              created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), nullable=False)
+              metadata_info: Optional[str] = Field(default=None)  # For storing conversation metadata
+
+              messages: List["Message"] = Relationship(back_populates="conversation")
+
+          class Message(SQLModel, table=True):
+              id: Optional[int] = Field(default=None, primary_key=True)
+              conversation_id: Optional[int] = Field(default=None, foreign_key="conversation.id")
+              sender: str
+              content: str
+              created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), nullable=False)
+              message_type: str = Field(default="standard")  # Type of message: standard, memory, reminder, etc.
+              tags: Optional[str] = Field(default=None)  # For categorizing important messages
+
+              conversation: Optional[Conversation] = Relationship(back_populates="messages")
+          '''
+          with open('/app/backend/app/models/chat.py', 'w') as f:
+              f.write(chat_model_content)
+
+          # Create app/routes/__init__.py
+          os.makedirs('/app/backend/app/routes', exist_ok=True)
+          with open('/app/backend/app/routes/__init__.py', 'w') as f:
+              f.write('')
+
+          # Create app/routes/tasks.py
+          tasks_route_content = '''
+          from fastapi import APIRouter, Depends, HTTPException
+          from sqlmodel import Session, select
+          from typing import List
+          from uuid import UUID
+          from datetime import datetime, timezone
+
+          from ..database import get_session
+          from ..models.task import Task, TaskCreate, TaskUpdate
+          from ..auth import get_current_user_id
+
+          router = APIRouter(prefix="/tasks", tags=["tasks"])
+
+          @router.post("/", response_model=Task)
+          def create_task(
+              task_in: TaskCreate,
+              session: Session = Depends(get_session),
+              user_id: str = Depends(get_current_user_id)
+          ):
+              # Validate inputs
+              if not task_in.title.strip():
+                  raise HTTPException(status_code=400, detail="Task title cannot be empty")
+
+              if len(task_in.title) > 200:
+                  raise HTTPException(status_code=400, detail="Task title too long, max 200 characters")
+
+              if task_in.description and len(task_in.description) > 1000:
+                  raise HTTPException(status_code=400, detail="Task description too long, max 1000 characters")
+
+              try:
+                  db_task = Task.model_validate(task_in, update={"user_id": user_id})
+                  session.add(db_task)
+                  session.commit()
+                  session.refresh(db_task)
+                  return db_task
+              except Exception as e:
+                  session.rollback()
+                  raise HTTPException(status_code=500, detail="Failed to create task")
+
+          @router.get("/", response_model=List[Task])
+          def read_tasks(
+              session: Session = Depends(get_session),
+              user_id: str = Depends(get_current_user_id)
+          ):
+              statement = select(Task).where(Task.user_id == user_id)
+              return session.exec(statement).all()
+
+          @router.get("/{id}", response_model=Task)
+          def read_task(
+              id: UUID,
+              session: Session = Depends(get_session),
+              user_id: str = Depends(get_current_user_id)
+          ):
+              task = session.get(Task, id)
+              if not task or task.user_id != user_id:
+                  raise HTTPException(status_code=404, detail="Task not found")
+              return task
+
+          @router.put("/{id}", response_model=Task)
+          def update_task(
+              id: UUID,
+              task_update: TaskUpdate,
+              session: Session = Depends(get_session),
+              user_id: str = Depends(get_current_user_id)
+          ):
+              db_task = session.get(Task, id)
+              if not db_task or db_task.user_id != user_id:
+                  raise HTTPException(status_code=404, detail="Task not found")
+
+              # Validate inputs
+              if task_update.title and not task_update.title.strip():
+                  raise HTTPException(status_code=400, detail="Task title cannot be empty")
+
+              if task_update.title and len(task_update.title) > 200:
+                  raise HTTPException(status_code=400, detail="Task title too long, max 200 characters")
+
+              if task_update.description and len(task_update.description) > 1000:
+                  raise HTTPException(status_code=400, detail="Task description too long, max 1000 characters")
+
+              try:
+                  task_data = task_update.model_dump(exclude_unset=True)
+                  for key, value in task_data.items():
+                      setattr(db_task, key, value)
+
+                  db_task.updated_at = datetime.now(timezone.utc)
+                  session.add(db_task)
+                  session.commit()
+                  session.refresh(db_task)
+                  return db_task
+              except Exception as e:
+                  session.rollback()
+                  raise HTTPException(status_code=500, detail="Failed to update task")
+
+          @router.delete("/{id}")
+          def delete_task(
+              id: UUID,
+              session: Session = Depends(get_session),
+              user_id: str = Depends(get_current_user_id)
+          ):
+              task = session.get(Task, id)
+              if not task or task.user_id != user_id:
+                  raise HTTPException(status_code=404, detail="Task not found")
+
+              session.delete(task)
+              session.commit()
+              return {"ok": True}
+
+          @router.patch("/{id}/complete", response_model=Task)
+          def toggle_task_complete(
+              id: UUID,
+              session: Session = Depends(get_session),
+              user_id: str = Depends(get_current_user_id)
+          ):
+              db_task = session.get(Task, id)
+              if not db_task or db_task.user_id != user_id:
+                  raise HTTPException(status_code=404, detail="Task not found")
+
+              db_task.is_completed = not db_task.is_completed
+              db_task.updated_at = datetime.now(timezone.utc)
+              session.add(db_task)
+              session.commit()
+              session.refresh(db_task)
+              return db_task
+          '''
+          with open('/app/backend/app/routes/tasks.py', 'w') as f:
+              f.write(tasks_route_content)
+
+          # Create app/routes/chat.py (simplified version)
+          chat_route_content = '''
+          from fastapi import APIRouter, HTTPException, Depends
+          from pydantic import BaseModel
+          import httpx
+          from typing import Dict, Any, List, Union, Optional
+          from sqlmodel import Session, select
+          from datetime import datetime, timezone
+          import json
+          from uuid import uuid4
+
+          import google.generativeai as genai
+          from app.config import settings
+
+          from app.database import get_session
+          from app.models.chat import Conversation, Message
+
+          class MemoryEntry(BaseModel):
+              content: str
+              timestamp: datetime
+              tags: Optional[List[str]] = None
+              importance: int = 1  # 1-5 scale of importance
+
+          class RememberRequest(BaseModel):
+              content: str
+              tags: Optional[List[str]] = None
+              importance: int = 3  # Default medium importance
+
+          router = APIRouter(prefix="/chat", tags=["chat"])
+
+          class ChatMessage(BaseModel):
+              message: str
+
+          class ToolCall(BaseModel):
+              tool_name: str
+              arguments: Dict[str, Any]
+              output: Optional[str] = None # Added output field
+
+          class ChatResponse(BaseModel):
+              ai_message: str
+              tool_calls: List[ToolCall] = []
+
+          class MessageDisplay(BaseModel):
+              message: str
+              sender: str
+              created_at: datetime
+              tool_calls: List[ToolCall] = []
+
+          MCP_SERVER_URL = "http://mcp-server-service:8001"
+
+          async def get_mcp_client():
+              async with httpx.AsyncClient(base_url=MCP_SERVER_URL) as client:
+                  yield client
+
+          async def get_or_create_conversation(user_id: str, session: Session) -> Conversation:
+              conversation = session.exec(
+                  select(Conversation).where(Conversation.user_id == user_id)
+              ).first()
+              if not conversation:
+                  conversation = Conversation(user_id=user_id)
+                  session.add(conversation)
+                  session.commit()
+                  session.refresh(conversation)
+              return conversation
+
+          # Configure and initialize Gemini client
+          genai.configure(api_key=settings.GEMINI_API_KEY)
+          GEMINI_MODEL = "gemini-1.5-flash"
+          gemini_client = genai.GenerativeModel(GEMINI_MODEL)
+
+          async def get_user_memories(user_id: str, session: Session, limit: int = 10) -> List[MemoryEntry]:
+              """Retrieve important memories for the user"""
+              try:
+                  conversation = session.exec(
+                      select(Conversation).where(Conversation.user_id == user_id)
+                  ).first()
+
+                  if not conversation:
+                      return []
+
+                  # Get recent messages that are marked as important, memories, or reminders
+                  memory_messages = session.exec(
+                      select(Message)
+                      .where(
+                          (Message.conversation_id == conversation.id) &
+                          ((Message.message_type.in_(["memory", "reminder", "important"])) |
+                           (Message.tags.contains("important") if Message.tags else False))
+                      )
+                      .order_by(Message.created_at.desc())
+                      .limit(limit)
+                  ).all()
+
+                  memories = []
+                  for msg in memory_messages:
+                      tags = msg.tags.split(",") if msg.tags else []
+                      memories.append(MemoryEntry(
+                          content=msg.content,
+                          timestamp=msg.created_at,
+                          tags=tags,
+                          importance=5 if msg.message_type in ["memory", "important"] else 3
+                      ))
+
+                  return memories
+              except Exception as e:
+                  print(f"Error retrieving user memories: {e}")
+                  return []
+
+          @router.post("/{user_id}/chat", response_model=ChatResponse)
+          async def chat(
+              user_id: str,
+              chat_message: ChatMessage,
+              session: Session = Depends(get_session),
+              mcp_client: httpx.AsyncClient = Depends(get_mcp_client)
+          ):
+              """
+              This endpoint receives a message from the user, processes it using a Gemini AI agent,
+              persists the conversation, and returns an AI response along with any triggered tool calls.
+              """
+              if not chat_message.message.strip():
+                  raise HTTPException(status_code=400, detail="Message cannot be empty")
+
+              if len(chat_message.message) > 2000:
+                  raise HTTPException(status_code=400, detail="Message too long, max 2000 characters")
+
+              try:
+                  conversation = await get_or_create_conversation(user_id, session)
+
+                  user_msg_db = Message(
+                      conversation_id=conversation.id,
+                      sender="user",
+                      content=chat_message.message,
+                      created_at=datetime.now(timezone.utc),
+                      message_type="standard"
+                  )
+                  session.add(user_msg_db)
+                  session.commit()
+                  session.refresh(user_msg_db)
+
+                  # For simplicity in this deployment, return a simulated response
+                  # In a real deployment, we would connect to the Gemini API
+                  ai_message_content = f"Received your message: '{chat_message.message}'. This is a simulated response."
+                  tool_calls_executed = []
+
+                  # Persist AI's response and tool calls
+                  content_to_store = ai_message_content
+                  if tool_calls_executed:
+                      content_to_store += "\\n\\nTool Calls: " + json.dumps([tc.model_dump() for tc in tool_calls_executed])
+
+                  ai_msg_db = Message(
+                      conversation_id=conversation.id,
+                      sender="agent",
+                      content=content_to_store,
+                      created_at=datetime.now(timezone.utc),
+                      message_type="response"
+                  )
+                  session.add(ai_msg_db)
+                  session.commit()
+                  session.refresh(ai_msg_db)
+
+                  return ChatResponse(ai_message=ai_message_content, tool_calls=tool_calls_executed)
+
+              except HTTPException:
+                  # Re-raise HTTP exceptions as-is
+                  raise
+              except Exception as e:
+                  # Log the error and return a generic error response
+                  print(f"Unexpected error in chat endpoint: {e}")
+                  raise HTTPException(status_code=500, detail="An error occurred processing your request")
+
+          @router.get("/{user_id}/chat/history", response_model=List[MessageDisplay])
+          async def get_chat_history(user_id: str, session: Session = Depends(get_session)):
+              """
+              Retrieves the conversation history for a given user.
+              """
+              conversation = session.exec(
+                  select(Conversation).where(Conversation.user_id == user_id)
+              ).first()
+
+              if not conversation:
+                  return []
+
+              messages = session.exec(
+                  select(Message)
+                  .where(Message.conversation_id == conversation.id)
+                  .order_by(Message.created_at)
+              ).all()
+
+              history_display = []
+              for msg in messages:
+                  tool_calls_parsed: List[ToolCall] = []
+                  message_content = msg.content
+
+                  if "Tool Calls: [" in message_content:
+                      try:
+                          parts = message_content.split("Tool Calls: [", 1)
+                          message_content = parts[0].strip()
+                          json_tool_calls_str = "[" + parts[1]
+                          tool_call_data_list = json.loads(json_tool_calls_str)
+                          for tool_call_data in tool_call_data_list:
+                              tool_calls_parsed.append(ToolCall(**tool_call_data))
+                      except json.JSONDecodeError:
+                          print(f"Could not parse tool calls from message content: {msg.content}")
+                      except Exception as e:
+                          print(f"Error extracting tool calls: {e} from {msg.content}")
+
+                  history_display.append(MessageDisplay(
+                      message=message_content,
+                      sender=msg.sender,
+                      created_at=msg.created_at,
+                      tool_calls=tool_calls_parsed
+                  ))
+
+              return history_display
+
+          @router.post("/{user_id}/remember")
+          async def remember_information(
+              user_id: str,
+              remember_request: RememberRequest,
+              session: Session = Depends(get_session)
+          ):
+              """
+              Allows the user to explicitly ask the system to remember specific information.
+              """
+              if not remember_request.content.strip():
+                  raise HTTPException(status_code=400, detail="Content cannot be empty")
+
+              if len(remember_request.content) > 2000:
+                  raise HTTPException(status_code=400, detail="Content too long, max 2000 characters")
+
+              if remember_request.importance < 1 or remember_request.importance > 5:
+                  raise HTTPException(status_code=400, detail="Importance must be between 1 and 5")
+
+              conversation = await get_or_create_conversation(user_id, session)
+
+              # Create a special message that marks this as an important memory
+              memory_message = Message(
+                  conversation_id=conversation.id,
+                  sender="system",
+                  content=remember_request.content,
+                  created_at=datetime.utcnow(),
+                  message_type="memory",
+                  tags=",".join(remember_request.tags) if remember_request.tags else "important"
+              )
+
+              try:
+                  session.add(memory_message)
+                  session.commit()
+                  session.refresh(memory_message)
+              except Exception as e:
+                  session.rollback()
+                  raise HTTPException(status_code=500, detail="Failed to save memory")
+
+              return {"message": "Information saved to memory successfully", "id": memory_message.id}
+
+          @router.get("/{user_id}/memories", response_model=List[MemoryEntry])
+          async def get_memories(
+              user_id: str,
+              session: Session = Depends(get_session),
+              importance_threshold: int = 2
+          ):
+              """
+              Retrieve important memories stored for the user.
+              """
+              conversation = session.exec(
+                  select(Conversation).where(Conversation.user_id == user_id)
+              ).first()
+
+              if not conversation:
+                  return []
+
+              messages = session.exec(
+                  select(Message)
+                  .where(Message.conversation_id == conversation.id)
+                  .order_by(Message.created_at.desc())  # Most recent first
+              ).all()
+
+              # Extract memories based on tags, message type, and importance
+              memories = []
+              for msg in messages:
+                  if msg.message_type in ["memory", "reminder", "important"]:
+                      tags = msg.tags.split(",") if msg.tags else []
+                      memories.append(MemoryEntry(
+                          content=msg.content,
+                          timestamp=msg.created_at,
+                          tags=tags,
+                          importance=5 if msg.message_type in ["memory", "important"] else 3
+                      ))
+
+              return memories
+
+          @router.delete("/{user_id}/memory/{message_id}")
+          async def forget_memory(
+              user_id: str,
+              message_id: int,
+              session: Session = Depends(get_session)
+          ):
+              """
+              Remove a specific memory entry.
+              """
+              message = session.get(Message, message_id)
+
+              if not message:
+                  raise HTTPException(status_code=404, detail="Memory not found")
+
+              if message.conversation.user_id != user_id:
+                  raise HTTPException(status_code=403, detail="Not authorized to delete this memory")
+
+              session.delete(message)
+              session.commit()
+
+              return {"message": "Memory removed successfully"}
+          '''
+          with open('/app/backend/app/routes/chat.py', 'w') as f:
+              f.write(chat_route_content)
+
+          # Run the app
+          os.system("cd /app/backend && python main.py")
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 20
+          periodSeconds: 10
+          timeoutSeconds: 5
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 3
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "200m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        volumeMounts:
+        - name: temp-volume
+          mountPath: /tmp
+      volumes:
+      - name: temp-volume
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend-service
+  namespace: elevate-app
+  labels:
+    app.kubernetes.io/name: backend
+    app.kubernetes.io/part-of: elevate-app
+spec:
+  selector:
+    app: backend
+  ports:
+    - protocol: TCP
+      port: 8000
+      targetPort: 8000
+      name: backend-api
+  type: ClusterIP

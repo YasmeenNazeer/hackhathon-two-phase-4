@@ -1,0 +1,67 @@
+# Production environment configuration
+image:
+  backend:
+    tag: prod-latest
+  frontend:
+    tag: prod-latest
+  mcpServer:
+    tag: prod-latest
+
+replicaCount:
+  backend: 3
+  frontend: 3
+  mcpServer: 2
+  postgres: 2
+
+resources:
+  backend:
+    limits:
+      cpu: 2000m
+      memory: 2Gi
+    requests:
+      cpu: 500m
+      memory: 1Gi
+  frontend:
+    limits:
+      cpu: 2000m
+      memory: 2Gi
+    requests:
+      cpu: 500m
+      memory: 1Gi
+  mcpServer:
+    limits:
+      cpu: 2000m
+      memory: 2Gi
+    requests:
+      cpu: 500m
+      memory: 1Gi
+  postgres:
+    limits:
+      cpu: 2000m
+      memory: 4Gi
+    requests:
+      cpu: 1000m
+      memory: 2Gi
+
+externalSecrets:
+  enabled: true
+  provider: "vault"
+
+securityContext:
+  enabled: true
+  runAsNonRoot: true
+  runAsUser: 1000
+  fsGroup: 2000
+
+monitoring:
+  enabled: true
+  retentionDays: 90
+
+tracing:
+  enabled: true
+  retentionDays: 30
+  storageType: "elasticsearch"
+
+podSecurityPolicy:
+  enabled: true
+  privileged: false

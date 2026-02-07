@@ -1,0 +1,8 @@
+project: Hackathon II - Phase 2
+version: 0.1.0
+frameworks:
+  frontend: Next.js 16 (App Router)
+  backend: FastAPI
+  database: Neon PostgreSQL (SQLModel)
+  auth: Better Auth
+spec_path: specs/

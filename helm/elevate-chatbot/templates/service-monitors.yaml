@@ -1,0 +1,65 @@
+{{- if .Values.monitoring.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "elevate-chatbot.fullname" . }}-backend-monitor
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: backend
+spec:
+  selector:
+    matchLabels:
+      app: backend
+  endpoints:
+  - port: http
+    interval: 30s
+    path: /metrics
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "elevate-chatbot.fullname" . }}-frontend-monitor
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: frontend
+spec:
+  selector:
+    matchLabels:
+      app: frontend
+  endpoints:
+  - port: http
+    interval: 30s
+    path: /metrics
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "elevate-chatbot.fullname" . }}-mcp-server-monitor
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: mcp-server
+spec:
+  selector:
+    matchLabels:
+      app: mcp-server
+  endpoints:
+  - port: http
+    interval: 30s
+    path: /metrics
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "elevate-chatbot.fullname" . }}-postgres-monitor
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: postgres
+spec:
+  selector:
+    matchLabels:
+      app: postgres
+  endpoints:
+  - port: http
+    interval: 30s
+    path: /metrics
+{{- end }}

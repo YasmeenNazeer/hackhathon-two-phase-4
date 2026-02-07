@@ -1,0 +1,81 @@
+# CI/CD Pipeline Configuration for Multi-Environment Deployment
+
+name: Deploy to Multiple Environments
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  deploy-dev:
+    if: github.ref == 'refs/heads/develop'
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Setup kubectl
+      uses: azure/setup-kubectl@v3
+
+    - name: Setup Helm
+      uses: azure/setup-helm@v3
+
+    - name: Start Minikube
+      uses: medyagh/setup-minikube@latest
+
+    - name: Deploy to Development
+      run: |
+        helm upgrade --install elevate-chatbot-dev ./helm/elevate-chatbot \
+          --namespace elevate-dev --create-namespace \
+          -f ./helm/elevate-chatbot/values-dev.yaml \
+          --set image.backend.tag=${{ github.sha }} \
+          --set image.frontend.tag=${{ github.sha }} \
+          --set image.mcpServer.tag=${{ github.sha }}
+
+  deploy-staging:
+    if: github.event_name == 'pull_request' && github.base_ref == 'main'
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Setup kubectl
+      uses: azure/setup-kubectl@v3
+
+    - name: Setup Helm
+      uses: azure/setup-helm@v3
+
+    - name: Start Minikube
+      uses: medyagh/setup-minikube@latest
+
+    - name: Deploy to Staging
+      run: |
+        helm upgrade --install elevate-chatbot-staging ./helm/elevate-chatbot \
+          --namespace elevate-staging --create-namespace \
+          -f ./helm/elevate-chatbot/values-staging.yaml \
+          --set image.backend.tag=${{ github.sha }} \
+          --set image.frontend.tag=${{ github.sha }} \
+          --set image.mcpServer.tag=${{ github.sha }}
+
+  deploy-prod:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Setup kubectl
+      uses: azure/setup-kubectl@v3
+
+    - name: Setup Helm
+      uses: azure/setup-helm@v3
+
+    - name: Start Minikube
+      uses: medyagh/setup-minikube@latest
+
+    - name: Deploy to Production
+      run: |
+        helm upgrade --install elevate-chatbot-prod ./helm/elevate-chatbot \
+          --namespace elevate-prod --create-namespace \
+          -f ./helm/elevate-chatbot/values-prod.yaml \
+          --set image.backend.tag=${{ github.sha }} \
+          --set image.frontend.tag=${{ github.sha }} \
+          --set image.mcpServer.tag=${{ github.sha }}

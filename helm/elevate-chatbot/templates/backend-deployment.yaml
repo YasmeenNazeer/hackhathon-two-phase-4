@@ -1,0 +1,95 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend-deployment
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: {{ .Values.replicaCount.backend }}
+  selector:
+    matchLabels:
+      app: backend
+  template:
+    metadata:
+      labels:
+        app: backend
+    spec:
+      securityContext:
+{{- if .Values.securityContext.enabled }}
+        runAsNonRoot: {{ .Values.securityContext.runAsNonRoot }}
+        runAsUser: {{ .Values.securityContext.runAsUser }}
+        fsGroup: {{ .Values.securityContext.fsGroup }}
+{{- end }}
+{{- if .Values.runtimeSecurity }}
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 3000
+        fsGroup: 2000
+{{- end }}
+      containers:
+      - name: backend
+        image: "{{ .Values.image.backend.repository }}:{{ .Values.image.backend.tag }}"
+        imagePullPolicy: {{ .Values.image.backend.pullPolicy }}
+        securityContext:
+          readOnlyRootFilesystem: {{ .Values.runtimeSecurity.readOnlyRootFilesystem | default false }}
+          allowPrivilegeEscalation: {{ .Values.runtimeSecurity.allowPrivilegeEscalation | default true }}
+          capabilities:
+            drop:
+{{ toYaml .Values.runtimeSecurity.capabilities.drop | indent 14 }}
+            add:
+{{ toYaml .Values.runtimeSecurity.capabilities.add | indent 14 }}
+        ports:
+        imagePullPolicy: {{ .Values.image.backend.pullPolicy }}
+        ports:
+        - containerPort: 8000
+        env:
+        - name: DATABASE_URL
+          value: {{ .Values.environment.backend.DATABASE_URL | quote }}
+        - name: DEBUG
+          value: {{ .Values.environment.backend.DEBUG | quote }}
+        - name: JWT_SECRET
+          valueFrom:
+          {{- if .Values.externalSecrets.enabled }}
+            secretKeyRef:
+              name: {{ include "elevate-chatbot.fullname" . }}-secrets
+              key: jwt-secret
+          {{- else }}
+            secretKeyRef:
+              name: {{ include "elevate-chatbot.fullname" . }}-secrets
+              key: jwt-secret
+          {{- end }}
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        resources:
+{{ toYaml .Values.resources.backend | indent 10 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend-service
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: backend
+    tier: backend
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "8000"
+    prometheus.io/path: "/metrics"
+spec:
+  selector:
+    app: backend
+  ports:
+    - protocol: TCP
+      port: {{ .Values.service.backend.port }}
+      targetPort: {{ .Values.service.backend.targetPort }}
+      name: http
+  type: {{ .Values.service.backend.type }}

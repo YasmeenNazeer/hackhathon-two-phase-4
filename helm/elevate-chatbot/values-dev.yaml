@@ -1,0 +1,57 @@
+# Development environment configuration
+image:
+  backend:
+    tag: dev-latest
+  frontend:
+    tag: dev-latest
+  mcpServer:
+    tag: dev-latest
+
+replicaCount:
+  backend: 1
+  frontend: 1
+  mcpServer: 1
+  postgres: 1
+
+resources:
+  backend:
+    limits:
+      cpu: 500m
+      memory: 512Mi
+    requests:
+      cpu: 100m
+      memory: 128Mi
+  frontend:
+    limits:
+      cpu: 500m
+      memory: 512Mi
+    requests:
+      cpu: 100m
+      memory: 128Mi
+  mcpServer:
+    limits:
+      cpu: 500m
+      memory: 512Mi
+    requests:
+      cpu: 100m
+      memory: 128Mi
+  postgres:
+    limits:
+      cpu: 500m
+      memory: 512Mi
+    requests:
+      cpu: 100m
+      memory: 128Mi
+
+environment:
+  backend:
+    DEBUG: "True"
+
+monitoring:
+  enabled: true
+
+tracing:
+  enabled: true
+
+logging:
+  logLevel: "debug"

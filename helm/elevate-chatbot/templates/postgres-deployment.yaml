@@ -1,0 +1,96 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres-deployment
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: {{ .Values.replicaCount.postgres }}
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      securityContext:
+        fsGroup: 2000
+      containers:
+      - name: postgres
+        securityContext:
+          readOnlyRootFilesystem: {{ .Values.runtimeSecurity.readOnlyRootFilesystem | default false }}
+          allowPrivilegeEscalation: {{ .Values.runtimeSecurity.allowPrivilegeEscalation | default true }}
+          capabilities:
+            drop:
+{{ toYaml .Values.runtimeSecurity.capabilities.drop | indent 14 }}
+            add:
+{{ toYaml .Values.runtimeSecurity.capabilities.add | indent 14 }}
+        image: "{{ .Values.image.postgres.repository }}:{{ .Values.image.postgres.tag }}"
+        imagePullPolicy: {{ .Values.image.postgres.pullPolicy }}
+        ports:
+        - containerPort: 5432
+        env:
+        - name: POSTGRES_DB
+          value: "todo_db"
+        - name: POSTGRES_USER
+          value: "postgres"
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+          {{- if .Values.externalSecrets.enabled }}
+            secretKeyRef:
+              name: {{ include "elevate-chatbot.fullname" . }}-secrets
+              key: postgres-password
+          {{- else }}
+            secretKeyRef:
+              name: {{ include "elevate-chatbot.fullname" . }}-secrets
+              key: postgres-password
+          {{- end }}
+        - name: PGDATA
+          value: /var/lib/postgresql/data/pgdata
+        volumeMounts:
+        - name: postgres-storage
+          mountPath: /var/lib/postgresql/data
+        livenessProbe:
+          exec:
+            command:
+            - sh
+            - -c
+            - pg_isready -U postgres -d todo_db
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          exec:
+            command:
+            - sh
+            - -c
+            - pg_isready -U postgres -d todo_db
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        resources:
+{{ toYaml .Values.resources.postgres | indent 10 }}
+      volumes:
+      - name: postgres-storage
+        persistentVolumeClaim:
+          claimName: {{ include "elevate-chatbot.fullname" . }}-postgres-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-service
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: postgres
+    tier: database
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "5432"
+    prometheus.io/path: "/metrics"
+spec:
+  selector:
+    app: postgres
+  ports:
+    - protocol: TCP
+      port: {{ .Values.service.postgres.port }}
+      targetPort: {{ .Values.service.postgres.targetPort }}
+      name: postgres
+  type: {{ .Values.service.postgres.type }}

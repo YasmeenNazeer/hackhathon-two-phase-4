@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: elevate-config
+  namespace: elevate-app
+data:
+  # Environment variables
+  DATABASE_URL: "postgresql://elevate_user:elevate_password@postgres-service:5432/elevate"
+  NEXT_PUBLIC_BACKEND_URL: "http://backend-service:8000"
+  LOG_LEVEL: "info"
+  API_TIMEOUT: "30"

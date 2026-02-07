@@ -1,0 +1,53 @@
+# Staging environment configuration
+image:
+  backend:
+    tag: staging-latest
+  frontend:
+    tag: staging-latest
+  mcpServer:
+    tag: staging-latest
+
+replicaCount:
+  backend: 2
+  frontend: 2
+  mcpServer: 2
+  postgres: 1
+
+resources:
+  backend:
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+    requests:
+      cpu: 200m
+      memory: 256Mi
+  frontend:
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+    requests:
+      cpu: 200m
+      memory: 256Mi
+  mcpServer:
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+    requests:
+      cpu: 200m
+      memory: 256Mi
+  postgres:
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+    requests:
+      cpu: 200m
+      memory: 256Mi
+
+monitoring:
+  enabled: true
+
+tracing:
+  enabled: true
+
+networkPolicies:
+  enabled: true

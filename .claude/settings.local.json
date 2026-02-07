@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(mkdir -p .spec-kit specs/features specs/api specs/database specs/ui)"
+    ]
+  }
+}

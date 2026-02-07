@@ -1,0 +1,58 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: elevate-app-network-policy
+  namespace: elevate-app
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: elevate-app
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/part-of: elevate-app
+    ports:
+    - protocol: TCP
+      port: 8000  # backend
+    - protocol: TCP
+      port: 8001  # mcp server
+    - protocol: TCP
+      port: 5432  # postgres
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+      podSelector:
+        matchLabels:
+          k8s-app: kube-proxy
+    ports:
+    - protocol: TCP
+      port: 8000
+  egress:
+  - to:
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/part-of: elevate-app
+    ports:
+    - protocol: TCP
+      port: 8000  # backend
+    - protocol: TCP
+      port: 8001  # mcp server
+    - protocol: TCP
+      port: 5432  # postgres
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+    ports:
+    - protocol: TCP
+      port: 53
+    - protocol: UDP
+      port: 53
