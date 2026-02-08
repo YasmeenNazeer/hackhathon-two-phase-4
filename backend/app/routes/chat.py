@@ -7,7 +7,16 @@ from datetime import datetime, timezone
 import json
 from uuid import uuid4 # Import uuid4 for tool_call_id
 
+import warnings
+# Suppress the deprecation warning for now
+warnings.filterwarnings("ignore", message="All support for the `google.generativeai` package has ended")
+
 import google.generativeai as genai
+NEW_GENAI = False  # Using the old library for now
+
+# Additional warning suppression for protobuf/schema warnings
+warnings.filterwarnings("ignore", message=".*anyOf.*")
+    
 from app.config import settings
 
 from app.database import get_session
@@ -44,7 +53,7 @@ class MessageDisplay(BaseModel):
     created_at: datetime
     tool_calls: List[ToolCall] = []
 
-MCP_SERVER_URL = "http://localhost:8001"
+MCP_SERVER_URL = "http://127.0.0.1:8001"  # Changed to use 127.0.0.1 for better compatibility
 
 async def get_mcp_client():
     async with httpx.AsyncClient(base_url=MCP_SERVER_URL) as client:
@@ -92,11 +101,12 @@ def clean_schema_for_gemini(schema):
     if isinstance(schema, dict):
         cleaned = {}
         for key, value in schema.items():
-            if key == "title":  # Skip the title field that causes issues
+            # Known problematic fields that Gemini doesn't support
+            if key in ["title", "$defs", "definitions", "anyOf", "allOf", "oneOf", "default", "examples", "deprecated", "readOnly", "writeOnly", "xml", "externalDocs", "example"]:
                 continue
             elif isinstance(value, dict):
                 if key == "properties":
-                    # Clean properties by removing 'title' fields
+                    # Clean properties by removing problematic fields
                     cleaned_props = {}
                     for prop_key, prop_value in value.items():
                         if isinstance(prop_value, dict):
@@ -104,6 +114,15 @@ def clean_schema_for_gemini(schema):
                         else:
                             cleaned_props[prop_key] = prop_value
                     cleaned[key] = cleaned_props
+                elif key == "items":
+                    # Handle array items schema
+                    cleaned[key] = clean_schema_for_gemini(value)
+                elif key == "additionalProperties":
+                    # Handle additionalProperties
+                    if isinstance(value, dict):
+                        cleaned[key] = clean_schema_for_gemini(value)
+                    else:
+                        cleaned[key] = value
                 else:
                     cleaned[key] = clean_schema_for_gemini(value)
             elif isinstance(value, list):
@@ -115,9 +134,35 @@ def clean_schema_for_gemini(schema):
 
 
 # Configure and initialize Gemini client
-genai.configure(api_key=settings.GEMINI_API_KEY)
-GEMINI_MODEL = "gemini-1.5-flash"
-gemini_client = genai.GenerativeModel(GEMINI_MODEL)
+print(f"Attempting to configure Gemini with API key: {'SET' if settings.GEMINI_API_KEY and settings.GEMINI_API_KEY != 'your-gemini-api-key-here' else 'NOT SET OR DEFAULT'}")
+if settings.GEMINI_API_KEY and settings.GEMINI_API_KEY != 'your-gemini-api-key-here':
+    genai.configure(api_key=settings.GEMINI_API_KEY)
+else:
+    print("WARNING: GEMINI_API_KEY is not properly configured!")
+
+def get_available_model():
+    """Get an available model that supports function calling"""
+    try:
+        # List available models
+        models = genai.list_models()
+        for model in models:
+            if 'generateContent' in model.supported_generation_methods:
+                # Prefer models that support tools/function calling
+                if 'code_execution' in model.supported_generation_methods or \
+                   'generateContent' in model.supported_generation_methods:
+                    # Check if it's a Gemini model
+                    if 'gemini' in model.name.lower():
+                        return model.name
+        
+        # If no specific model found, return a default
+        return "models/gemini-1.0-pro"
+    except Exception as e:
+        print(f"Error listing models: {e}")
+        # Return a default model if listing fails
+        return "models/gemini-1.0-pro"
+
+GEMINI_MODEL = get_available_model()
+print(f"Using Gemini model: {GEMINI_MODEL}")
 
 async def get_user_memories(user_id: str, session: Session, limit: int = 10) -> List[MemoryEntry]:
     """Retrieve important memories for the user"""
@@ -192,21 +237,60 @@ async def gemini_agent_response(
     # Prepare tools for Gemini (function declarations)
     gemini_tools = []
     for tool_def in mcp_tools:
-        # Clean up the schema to remove fields that Gemini doesn't expect
-        cleaned_schema = clean_schema_for_gemini(tool_def["inputSchema"])
-        
-        function_declaration = {
-            "name": tool_def["name"],
-            "description": tool_def["description"],
-            "parameters": cleaned_schema
-        }
-        gemini_tools.append({"function_declarations": [function_declaration]})
+        try:
+            # Clean up the schema to remove fields that Gemini doesn't expect
+            cleaned_schema = clean_schema_for_gemini(tool_def["inputSchema"])
 
-    # Configure the model with tools
-    model_with_tools = genai.GenerativeModel(
-        model_name=GEMINI_MODEL,
-        tools=gemini_tools
-    )
+            if NEW_GENAI:
+                # New API format
+                function_declaration = {
+                    "name": tool_def["name"],
+                    "description": tool_def["description"],
+                    "parameters": cleaned_schema
+                }
+                gemini_tools.append({"function_declarations": [function_declaration]})
+            else:
+                # Old API format
+                function_declaration = {
+                    "name": tool_def["name"],
+                    "description": tool_def["description"],
+                    "parameters": cleaned_schema
+                }
+                gemini_tools.append({"function_declarations": [function_declaration]})
+        except Exception as e:
+            print(f"Error processing tool schema for {tool_def['name']}: {e}")
+            # Skip this tool if there's an error
+            continue
+
+    # Configure the model with tools (if any were successfully processed)
+    try:
+        if gemini_tools:
+            model_with_tools = genai.GenerativeModel(
+                model_name=GEMINI_MODEL,
+                tools=gemini_tools
+            )
+        else:
+            # Fallback to model without tools if schema processing failed
+            print("Warning: No tools available, proceeding without function calling capability")
+            model_with_tools = genai.GenerativeModel(model_name=GEMINI_MODEL)
+    except Exception as model_error:
+        print(f"Error initializing model {GEMINI_MODEL}: {model_error}")
+        # Try a fallback model
+        fallback_model = "models/gemini-1.0-pro-001"  # Another common model name
+        try:
+            if gemini_tools:
+                model_with_tools = genai.GenerativeModel(
+                    model_name=fallback_model,
+                    tools=gemini_tools
+                )
+            else:
+                model_with_tools = genai.GenerativeModel(model_name=fallback_model)
+            print(f"Successfully initialized fallback model: {fallback_model}")
+        except Exception as fallback_error:
+            print(f"Fallback model also failed: {fallback_error}")
+            # Ultimate fallback: simple model without tools
+            model_with_tools = genai.GenerativeModel(model_name="models/gemini-1.0-pro-001")
+            print("Using ultimate fallback model")
 
     # Prepare conversation history for Gemini
     gemini_history = []
@@ -253,81 +337,190 @@ async def gemini_agent_response(
 
     # 4. Generate content with the model
     try:
+        print(f"Attempting to generate content with model: {model_with_tools.model_name}")
+        print(f"Gemini history length: {len(gemini_history)}")
+        print(f"Number of tools available: {len(gemini_tools) if 'gemini_tools' in locals() else 'N/A'}")
+        
         # Generate response with the full history
-        response = await model_with_tools.generate_content_async(gemini_history, request_options={"timeout": 60})
+        response = await model_with_tools.generate_content_async(gemini_history, request_options={"timeout": 120})
 
+        print("Gemini API call successful, processing response...")
+        
         # Process the response
-        if response.candidates and len(response.candidates) > 0:
-            candidate = response.candidates[0]
+        if NEW_GENAI:
+            # New API format may have different structure
+            if hasattr(response, 'candidates') and response.candidates and len(response.candidates) > 0:
+                candidate = response.candidates[0]
 
-            # Check for function calls in the response
-            if candidate.content and candidate.content.parts:
-                for part in candidate.content.parts:
-                    if part.function_call:
-                        # This is a function call request
-                        func_call = part.function_call
-                        tool_name = func_call.name
+                # Check for function calls in the response
+                if hasattr(candidate, 'content') and hasattr(candidate.content, 'parts'):
+                    for part in candidate.content.parts:
+                        if hasattr(part, 'function_call') and part.function_call:
+                            # This is a function call request
+                            func_call = part.function_call
+                            tool_name = func_call.name
 
-                        # Convert the function call arguments to a dict
-                        tool_args = {}
-                        if func_call.args:
-                            # Convert protobuf Struct to regular dict
-                            tool_args = {key: func_call.args[key] for key in func_call.args}
+                            # Convert the function call arguments to a dict
+                            tool_args = {}
+                            if hasattr(func_call, 'args') and func_call.args:
+                                # Convert protobuf Struct to regular dict
+                                tool_args = {key: func_call.args[key] for key in func_call.args}
 
-                        print(f"Gemini requested tool call: {tool_name} with args {tool_args}")
+                            print(f"Gemini requested tool call: {tool_name} with args {tool_args}")
 
-                        # Execute the tool via MCP server
-                        tool_output = "Error: Tool execution failed."
-                        try:
-                            mcp_call_response = await mcp_client.post(
-                                f"{MCP_SERVER_URL}/mcp_call",
-                                json={"tool_name": tool_name, "arguments": tool_args}
-                            )
-                            mcp_call_response.raise_for_status()
-                            tool_output = mcp_call_response.json()["results"]["content"][0]["text"]
-                        except httpx.RequestError as e:
-                            tool_output = f"MCP server request failed: {e}"
-                        except httpx.HTTPStatusError as e:
-                            tool_output = f"MCP server returned error: {e.response.status_code} - {e.response.text}"
-                        except Exception as e:
-                            tool_output = f"Error during tool execution: {e}"
+                            # Execute the tool via MCP server
+                            tool_output = "Error: Tool execution failed."
+                            try:
+                                mcp_call_response = await mcp_client.post(
+                                    "/mcp_call",
+                                    json={"tool_name": tool_name, "arguments": tool_args}
+                                )
+                                mcp_call_response.raise_for_status()
+                                tool_output = mcp_call_response.json()["results"]["content"][0]["text"]
+                            except httpx.RequestError as e:
+                                tool_output = f"MCP server request failed: {e}"
+                            except httpx.HTTPStatusError as e:
+                                tool_output = f"MCP server returned error: {e.response.status_code} - {e.response.text}"
+                            except Exception as e:
+                                tool_output = f"Error during tool execution: {e}"
 
-                        tool_calls_executed.append(ToolCall(
-                            tool_name=tool_name,
-                            arguments=tool_args,
-                            output=tool_output # Store the output
-                        ))
+                            tool_calls_executed.append(ToolCall(
+                                tool_name=tool_name,
+                                arguments=tool_args,
+                                output=tool_output # Store the output
+                            ))
 
-                        # Create a new chat session to continue the conversation
-                        chat_session = model_with_tools.start_chat(history=gemini_history[:-1])  # Exclude last user message
+                            # Create a new chat session to continue the conversation
+                            chat_session = model_with_tools.start_chat(history=gemini_history[:-1])  # Exclude last user message
 
-                        # Send the function result back to Gemini
-                        function_response_part = {
-                            "function_response": {
-                                "name": tool_name,
-                                "response": {
-                                    "result": tool_output
+                            # Send the function result back to Gemini
+                            function_response_part = {
+                                "function_response": {
+                                    "name": tool_name,
+                                    "response": {
+                                        "result": tool_output
+                                    }
                                 }
                             }
-                        }
 
-                        # Get final response after function call
-                        final_response = await chat_session.send_message_async([function_response_part], request_options={"timeout": 60})
-                        ai_response_content = ''.join([part.text for part in final_response.candidates[0].content.parts if hasattr(part, 'text') and part.text])
-                        break
+                            # Get final response after function call
+                            final_response = await chat_session.send_message_async([function_response_part], request_options={"timeout": 120})
+
+                            # Extract text from final response
+                            if hasattr(final_response, 'candidates') and final_response.candidates:
+                                final_candidate = final_response.candidates[0]
+                                if hasattr(final_candidate, 'content') and hasattr(final_candidate.content, 'parts'):
+                                    for final_part in final_candidate.content.parts:
+                                        if hasattr(final_part, 'text') and final_part.text:
+                                            ai_response_content += final_part.text
+                            break
+                        else:
+                            # This is a regular text response
+                            if hasattr(part, 'text') and part.text:
+                                ai_response_content += part.text
+                else:
+                    # Fallback to basic response if no content parts
+                    if hasattr(response, 'text'):
+                        ai_response_content = str(response.text)
+                        print(f"Direct text response: {ai_response_content[:100]}...")  # First 100 chars
+                    elif hasattr(response, '_text') and response._text:  # Handle different attribute names
+                        ai_response_content = str(response._text)
                     else:
-                        # This is a regular text response
-                        if hasattr(part, 'text') and part.text:
-                            ai_response_content += part.text
+                        ai_response_content = "I received a response but couldn't process it properly."
             else:
-                # Fallback to basic response if no content parts
-                ai_response_content = str(response.text) if hasattr(response, 'text') else "I received a response but couldn't process it properly."
+                ai_response_content = "No response received from Gemini API."
         else:
-            ai_response_content = "No response received from Gemini API."
+            # Old API format
+            if response.candidates and len(response.candidates) > 0:
+                candidate = response.candidates[0]
+
+                # Check for function calls in the response
+                if candidate.content and candidate.content.parts:
+                    for part in candidate.content.parts:
+                        if hasattr(part, 'function_call') and part.function_call:
+                            # This is a function call request
+                            func_call = part.function_call
+                            tool_name = func_call.name
+
+                            # Convert the function call arguments to a dict
+                            tool_args = {}
+                            if func_call.args:
+                                # Convert protobuf Struct to regular dict
+                                tool_args = {key: func_call.args[key] for key in func_call.args}
+
+                            print(f"Gemini requested tool call: {tool_name} with args {tool_args}")
+
+                            # Execute the tool via MCP server
+                            tool_output = "Error: Tool execution failed."
+                            try:
+                                mcp_call_response = await mcp_client.post(
+                                    "/mcp_call",
+                                    json={"tool_name": tool_name, "arguments": tool_args}
+                                )
+                                mcp_call_response.raise_for_status()
+                                tool_output = mcp_call_response.json()["results"]["content"][0]["text"]
+                            except httpx.RequestError as e:
+                                tool_output = f"MCP server request failed: {e}"
+                            except httpx.HTTPStatusError as e:
+                                tool_output = f"MCP server returned error: {e.response.status_code} - {e.response.text}"
+                            except Exception as e:
+                                tool_output = f"Error during tool execution: {e}"
+
+                            tool_calls_executed.append(ToolCall(
+                                tool_name=tool_name,
+                                arguments=tool_args,
+                                output=tool_output # Store the output
+                            ))
+
+                            # Create a new chat session to continue the conversation
+                            chat_session = model_with_tools.start_chat(history=gemini_history[:-1])  # Exclude last user message
+
+                            # Send the function result back to Gemini
+                            function_response_part = {
+                                "function_response": {
+                                    "name": tool_name,
+                                    "response": {
+                                        "result": tool_output
+                                    }
+                                }
+                            }
+
+                            # Get final response after function call
+                            final_response = await chat_session.send_message_async([function_response_part], request_options={"timeout": 120})
+                            ai_response_content = ''.join([part.text for part in final_response.candidates[0].content.parts if hasattr(part, 'text') and part.text])
+                            break
+                        else:
+                            # This is a regular text response
+                            if hasattr(part, 'text') and part.text:
+                                ai_response_content += part.text
+                else:
+                    # Fallback to basic response if no content parts
+                    if hasattr(response, 'text'):
+                        ai_response_content = str(response.text)
+                        print(f"Direct text response: {ai_response_content[:100]}...")  # First 100 chars
+                    elif hasattr(response, '_text') and response._text:  # Handle different attribute names
+                        ai_response_content = str(response._text)
+                    else:
+                        ai_response_content = "I received a response but couldn't process it properly."
+            else:
+                ai_response_content = "No response received from Gemini API."
 
     except Exception as e:
         print(f"Error with Gemini API: {e}")
-        ai_response_content = "I'm having trouble connecting to my AI brain. Please try again later."
+        import traceback
+        print(f"Full traceback: {traceback.format_exc()}")
+        # Provide more specific error information
+        error_str = str(e).lower()
+        if "api key" in error_str or "authentication" in error_str or "permission" in error_str:
+            ai_response_content = "Authentication error: Please check your API key configuration."
+        elif "quota" in error_str or "billing" in error_str:
+            ai_response_content = "Billing/quota error: Please check your Google Cloud billing setup."
+        elif "model" in error_str:
+            ai_response_content = "Model unavailable: The AI model is currently not accessible."
+        elif "timeout" in error_str:
+            ai_response_content = "Request timed out: The AI service took too long to respond."
+        else:
+            ai_response_content = f"I'm having trouble connecting to my AI brain. Error: {str(e)[:100]}"
 
     return {"ai_message": ai_response_content, "tool_calls": tool_calls_executed}
 
@@ -398,8 +591,18 @@ async def chat(
         raise
     except Exception as e:
         # Log the error and return a generic error response
+        import traceback
         print(f"Unexpected error in chat endpoint: {e}")
-        raise HTTPException(status_code=500, detail="An error occurred processing your request")
+        print(f"Traceback: {traceback.format_exc()}")
+        
+        # Check if it's a specific error type
+        error_msg = str(e)
+        if "anyOf" in error_msg or "Unknown field for Schema" in error_msg or "default" in error_msg:
+            raise HTTPException(status_code=500, detail="Schema compatibility issue with AI model. Please contact administrator.")
+        elif "models/" in error_msg and "is not found" in error_msg:
+            raise HTTPException(status_code=500, detail="AI model is not available. Please check your API configuration.")
+        else:
+            raise HTTPException(status_code=500, detail="An error occurred processing your request")
 
 @router.get("/{user_id}/chat/history", response_model=List[MessageDisplay])
 async def get_chat_history(user_id: str, session: Session = Depends(get_session)):
@@ -472,7 +675,7 @@ async def remember_information(
         conversation_id=conversation.id,
         sender="system",
         content=remember_request.content,
-        created_at=datetime.utcnow(),
+        created_at=datetime.now(timezone.utc),
         message_type="memory",
         tags=",".join(remember_request.tags) if remember_request.tags else "important"
     )

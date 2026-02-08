@@ -3,15 +3,18 @@ REM Batch script to start all services for the task management system
 
 echo Starting Task Management System...
 
+REM Set PYTHONPATH to include user packages
+set PYTHONPATH=C:/Users/JOJIS COMPUTERS/AppData/Roaming/Python/Python311/site-packages;%PYTHONPATH%
+
 REM Start MCP server in background
 echo Starting MCP Server on port 8001...
-start cmd /c "cd mcp_server && python main.py"
+start cmd /c "cd mcp_server && set PYTHONPATH=%PYTHONPATH% && python main.py"
 
 timeout /t 3 /nobreak >nul
 
 REM Start backend server in background
 echo Starting Backend Server on port 8000...
-start cmd /c "cd backend && python main.py"
+start cmd /c "cd backend && set PYTHONPATH=%PYTHONPATH% && python main.py"
 
 timeout /t 3 /nobreak >nul
 

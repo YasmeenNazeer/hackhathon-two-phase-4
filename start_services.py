@@ -9,23 +9,31 @@ from pathlib import Path
 def start_service(service_name, directory, command, port):
     """Start a service in a separate thread"""
     print(f"Starting {service_name} on port {port}...")
-    
+
     try:
         # Change to the service directory
         os.chdir(directory)
-        
-        # Start the process
-        if sys.platform.startswith('win'):
-            process = subprocess.Popen(command, shell=True)
+
+        # Prepare environment with PYTHONPATH to include user packages
+        env = os.environ.copy()
+        user_site_packages = 'C:/Users/JOJIS COMPUTERS/AppData/Roaming/Python/Python311/site-packages'
+        if 'PYTHONPATH' in env:
+            env['PYTHONPATH'] = user_site_packages + os.pathsep + env['PYTHONPATH']
         else:
-            process = subprocess.Popen(command, shell=True)
-        
+            env['PYTHONPATH'] = user_site_packages
+
+        # Start the process with the updated environment
+        if sys.platform.startswith('win'):
+            process = subprocess.Popen(command, shell=True, env=env)
+        else:
+            process = subprocess.Popen(command, shell=True, env=env)
+
         # Change back to the root directory
         os.chdir('..')
-        
+
         # Wait for the process to finish
         process.wait()
-        
+
     except KeyboardInterrupt:
         print(f"\nStopping {service_name}...")
         process.terminate()
