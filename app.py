@@ -1,10 +1,16 @@
 import os
+import hashlib
+import secrets
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, List
-from datetime import datetime
+from datetime import datetime, timedelta
 import uuid
+from passlib.context import CryptContext
+
+# Password hashing
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 # Initialize the main app
 app = FastAPI(title="Elevate Task Management Backend", docs_url="/docs", redoc_url="/redoc")
@@ -27,9 +33,24 @@ app.add_middleware(
 )
 
 # Simple in-memory storage (replace with database in production)
+users_db = {}
+sessions_db = {}
 tasks_db = []
 
 # Pydantic models
+class UserRegistration(BaseModel):
+    name: str
+    email: str
+    password: str
+
+class UserLogin(BaseModel):
+    email: str
+    password: str
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+
 class Task(BaseModel):
     id: Optional[str] = None
     user_id: str
@@ -48,6 +69,23 @@ class TaskUpdate(BaseModel):
     due_date: Optional[datetime] = None
     is_completed: Optional[bool] = None
 
+# Utility functions
+def hash_password(password: str) -> str:
+    return pwd_context.hash(password)
+
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    return pwd_context.verify(plain_password, hashed_password)
+
+def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
+    to_encode = data.copy()
+    if expires_delta:
+        expire = datetime.utcnow() + expires_delta
+    else:
+        expire = datetime.utcnow() + timedelta(minutes=15)
+    to_encode.update({"exp": expire})
+    encoded_jwt = secrets.token_urlsafe(32)  # Simplified token for demo
+    return encoded_jwt
+
 # Routes
 @app.get("/")
 def root():
@@ -64,6 +102,60 @@ def config_check():
         "database_url_set": bool(os.getenv("DATABASE_URL")),
         "port": os.getenv("PORT", "7860"),
         "environment": "huggingface-spaces"
+    }
+
+# Authentication endpoints
+@app.post("/api/register")
+def register_user(user_data: UserRegistration):
+    # Check if user already exists
+    for user in users_db.values():
+        if user["email"] == user_data.email:
+            raise HTTPException(status_code=400, detail="Email already registered")
+    
+    # Create new user
+    user_id = str(uuid.uuid4())
+    hashed_pw = hash_password(user_data.password)
+    
+    new_user = {
+        "id": user_id,
+        "name": user_data.name,
+        "email": user_data.email,
+        "hashed_password": hashed_pw,
+        "created_at": datetime.now()
+    }
+    
+    users_db[user_id] = new_user
+    
+    # Create access token
+    access_token = create_access_token(data={"sub": user_id})
+    
+    return {
+        "message": "User registered successfully",
+        "user_id": user_id,
+        "access_token": access_token,
+        "token_type": "bearer"
+    }
+
+@app.post("/api/login")
+def login_user(login_data: UserLogin):
+    # Find user by email
+    user = None
+    for u in users_db.values():
+        if u["email"] == login_data.email:
+            user = u
+            break
+    
+    if not user or not verify_password(login_data.password, user["hashed_password"]):
+        raise HTTPException(status_code=400, detail="Invalid credentials")
+    
+    # Create access token
+    access_token = create_access_token(data={"sub": user["id"]})
+    
+    return {
+        "message": "Login successful",
+        "user_id": user["id"],
+        "access_token": access_token,
+        "token_type": "bearer"
     }
 
 # Task endpoints
